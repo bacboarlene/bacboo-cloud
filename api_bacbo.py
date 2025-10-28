@@ -1,189 +1,173 @@
-from flask import Flask, jsonify
-import requests, csv, os, datetime, time, threading, pickle, base64
+# ==========================================================
+# 🌐 Bacbo Cloud API – Render + Google Drive v4.0
+# ==========================================================
+from flask import Flask, request, jsonify, send_file
+import csv, os, datetime, threading, time, pickle
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+from google.auth.transport.requests import Request
 
 # ==========================================================
-# 🌍 CONFIGURAÇÃO GERAL
+# ☁️ CONFIGURAÇÃO GOOGLE DRIVE
 # ==========================================================
-URL_LATEST = "https://api.casinoscores.com/svc-evolution-game-events/api/bacbo/latest"
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
-FOLDER_ID = '1-oK5YSVhb8ajwu-Pil-BiB4GiE841um1'
-TOKEN_FILE = '/etc/secrets/token_drive_base64.txt'
+TOKEN_PICKLE = 'token_drive.pkl'  # token autenticado localmente
+FOLDER_ID = '1-oK5YSVhb8ajwu-Pil-BiB4GiE841um1'  # pasta BacboCloud
 
-app = Flask(__name__)
-
-# ==========================================================
-# ☁️ AUTENTICAÇÃO GOOGLE DRIVE
-# ==========================================================
 drive_service = None
 try:
-    with open(TOKEN_FILE, 'r', encoding='utf-8') as f:
-        encoded = f.read().strip()
-        data = base64.b64decode(encoded)
-        with open('token_drive.pkl', 'wb') as t:
-            t.write(data)
-    with open('token_drive.pkl', 'rb') as token:
-        creds = pickle.load(token)
-    drive_service = build('drive', 'v3', credentials=creds)
-    print("✅ Autenticado com sucesso no Google Drive.")
+    if os.path.exists(TOKEN_PICKLE):
+        with open(TOKEN_PICKLE, 'rb') as token:
+            creds = pickle.load(token)
+            if creds and creds.valid:
+                drive_service = build('drive', 'v3', credentials=creds)
+                print("✅ Autenticado com sucesso no Google Drive.")
+            elif creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                drive_service = build('drive', 'v3', credentials=creds)
+                print("🔄 Token Drive renovado.")
+    else:
+        print("⚠️ Token ausente ou inválido. Reenvie o token_drive.pkl.")
 except Exception as e:
     print(f"⚠️ Falha ao autenticar Drive: {e}")
 
 # ==========================================================
-# ☁️ FUNÇÕES DE ENVIO AO DRIVE
+# 🧩 FUNÇÕES AUXILIARES CSV
 # ==========================================================
-def buscar_arquivo_drive(nome):
-    try:
-        query = f"'{FOLDER_ID}' in parents and name='{nome}' and trashed=false"
-        results = drive_service.files().list(q=query, fields="files(id)").execute()
-        files = results.get('files', [])
-        return files[0]['id'] if files else None
-    except Exception as e:
-        print(f"⚠️ Erro ao buscar arquivo no Drive: {e}")
-        return None
+def caminho_csv():
+    """Retorna o caminho do CSV do dia."""
+    os.makedirs("dados", exist_ok=True)
+    return os.path.join("dados", f"dados_{datetime.date.today()}.csv")
 
-def enviar_para_drive(arquivo_local):
+def registrar_rodada(linha: dict):
+    """Registra uma nova rodada sem apagar as anteriores."""
+    arquivo = caminho_csv()
+    cabecalho = [
+        "datahora", "id_rodada", "azul_1", "azul_2",
+        "vermelho_1", "vermelho_2", "soma_azul", "soma_vermelho",
+        "vencedor", "multiplier", "payout", "status"
+    ]
+    novo = not os.path.exists(arquivo)
+    with open(arquivo, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=cabecalho)
+        if novo:
+            writer.writeheader()
+        writer.writerow(linha)
+
+def ler_csv(limite=None):
+    """Lê as últimas N linhas do CSV atual."""
+    arquivo = caminho_csv()
+    if not os.path.exists(arquivo):
+        return []
+    with open(arquivo, "r", encoding="utf-8") as f:
+        linhas = list(csv.DictReader(f))
+    if limite:
+        return linhas[-limite:]
+    return linhas
+
+def ultima_rodada():
+    linhas = ler_csv()
+    return linhas[-1] if linhas else {}
+
+# ==========================================================
+# ☁️ UPLOAD PARA O GOOGLE DRIVE
+# ==========================================================
+def enviar_para_drive():
+    """Envia o CSV atual completo para o Google Drive."""
+    if not drive_service:
+        print("⚠️ Drive não autenticado, upload cancelado.")
+        return
     try:
-        nome_arquivo = os.path.basename(arquivo_local)
-        file_id = buscar_arquivo_drive(nome_arquivo)
-        media = MediaFileUpload(arquivo_local, mimetype='text/csv')
-        if file_id:
-            drive_service.files().update(fileId=file_id, media_body=media).execute()
-            print(f"☁️ Atualizado no Drive: {nome_arquivo}")
-        else:
-            metadata = {'name': nome_arquivo, 'parents': [FOLDER_ID]}
-            drive_service.files().create(body=metadata, media_body=media).execute()
-            print(f"☁️ Enviado novo arquivo para o Drive: {nome_arquivo}")
+        arquivo = caminho_csv()
+        if not os.path.exists(arquivo):
+            print("⚠️ Nenhum CSV para enviar.")
+            return
+        nome = os.path.basename(arquivo)
+        file_metadata = {'name': nome, 'parents': [FOLDER_ID]}
+        media = MediaFileUpload(arquivo, mimetype='text/csv')
+        drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+        print(f"☁️ Enviado para o Drive: {nome}")
     except Exception as e:
         print(f"⚠️ Erro ao enviar para o Drive: {e}")
 
 # ==========================================================
-# 🕛 ENVIO AUTOMÁTICO À MEIA-NOITE
+# ⏰ ROTINA AUTOMÁTICA MEIA-NOITE
 # ==========================================================
-def rotina_meianoite():
+def rotina_drive_diaria():
     while True:
         agora = datetime.datetime.now()
-        proxima = (agora + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=5, microsecond=0)
-        segundos = (proxima - agora).total_seconds()
-        print(f"⏰ Próximo envio ao Drive: {proxima}")
-        time.sleep(segundos)
+        if agora.hour == 0 and agora.minute == 0:
+            enviar_para_drive()
+            print("🕛 Upload automático concluído.")
+            time.sleep(60)
+        time.sleep(5)
 
-        try:
-            pasta = "dados"
-            nome_arquivo = f"dados_{datetime.date.today()}.csv"
-            arquivo = os.path.join(pasta, nome_arquivo)
-            if os.path.exists(arquivo):
-                enviar_para_drive(arquivo)
-            novo_arquivo = os.path.join(pasta, f"dados_{datetime.date.today() + datetime.timedelta(days=1)}.csv")
-            with open(novo_arquivo, "w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    "datahora","id_rodada","azul_1","azul_2","vermelho_1","vermelho_2",
-                    "soma_azul","soma_vermelho","vencedor","multiplier","payout","status"
-                ])
-            print(f"🌅 Novo CSV iniciado: {novo_arquivo}")
-        except Exception as e:
-            print(f"⚠️ Erro rotina meia-noite: {e}")
-
-threading.Thread(target=rotina_meianoite, daemon=True).start()
+threading.Thread(target=rotina_drive_diaria, daemon=True).start()
 
 # ==========================================================
-# 🤖 COLETOR AUTOMÁTICO (executa direto no Render)
+# 🌍 FLASK API
 # ==========================================================
-def coletar_dados():
-    sess = requests.Session()
-    ultimo_id = None
-    os.makedirs("dados", exist_ok=True)
-    os.makedirs("logs", exist_ok=True)
-    print("🌐 Coletor Bacbo Cloud iniciado.")
+app = Flask(__name__)
 
-    while True:
-        try:
-            r = sess.get(URL_LATEST, timeout=8)
-            if r.status_code != 200:
-                print(f"[ERRO HTTP] {r.status_code}")
-                time.sleep(5)
-                continue
-
-            j = r.json()
-            data = j.get("data", {})
-            gid = data.get("id")
-            if gid == ultimo_id or gid is None:
-                time.sleep(2)
-                continue
-
-            res = data.get("result", {})
-            player = res.get("playerDice", {})
-            banker = res.get("bankerDice", {})
-
-            a1, a2 = int(player.get("first", 0)), int(player.get("second", 0))
-            v1, v2 = int(banker.get("first", 0)), int(banker.get("second", 0))
-            soma_azul, soma_vermelho = a1 + a2, v1 + v2
-
-            outcome = res.get("outcome", "Desconhecido")
-            vencedor = {"PlayerWon": "Azul", "BankerWon": "Vermelho", "Tie": "Empate"}.get(outcome, outcome)
-            multiplier = res.get("multiplier") or res.get("tieMultiplier") or ""
-            payout = res.get("payout") or ""
-            status = res.get("status") or data.get("status") or ""
-
-            datahora = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-            linha = [
-                datahora, gid, a1, a2, v1, v2,
-                soma_azul, soma_vermelho, vencedor,
-                multiplier, payout, status
-            ]
-
-            nome_csv = f"dados/dados_{datetime.date.today()}.csv"
-            novo_arquivo = not os.path.exists(nome_csv)
-            with open(nome_csv, "a", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                if novo_arquivo:
-                    writer.writerow([
-                        "datahora","id_rodada","azul_1","azul_2","vermelho_1","vermelho_2",
-                        "soma_azul","soma_vermelho","vencedor","multiplier","payout","status"
-                    ])
-                writer.writerow(linha)
-
-            logfile = f"logs/log_{datetime.date.today()}.txt"
-            with open(logfile, "a", encoding="utf-8") as log:
-                log.write(f"[{datahora}] ID {gid} - {vencedor} ({soma_azul} x {soma_vermelho})\n")
-
-            print(f"[OK] Rodada {gid}: {vencedor} ({soma_azul} x {soma_vermelho}) Mult:{multiplier}")
-            ultimo_id = gid
-            time.sleep(2)
-        except Exception as e:
-            print(f"[ERRO] {e}")
-            time.sleep(5)
-
-# Thread principal do coletor
-threading.Thread(target=coletar_dados, daemon=True).start()
-
-# ==========================================================
-# 🌐 FLASK ROUTES
-# ==========================================================
 @app.route("/")
 def home():
-    return "✅ Bacbo Cloud Collector ativo — coleta automática + envio diário para o Drive."
+    return "🏠 Bacbo Cloud ativo — v4.0"
+
+@app.route("/ping")
+def ping():
+    return jsonify({"status": "online", "hora": datetime.datetime.now().isoformat()})
+
+@app.route("/registrar", methods=["POST"])
+def registrar():
+    """Recebe rodada de outro sistema (ex: coletor local)."""
+    data = request.json
+    if not data:
+        return jsonify({"erro": "sem dados"}), 400
+
+    soma_azul = data.get("azul_1", 0) + data.get("azul_2", 0)
+    soma_vermelho = data.get("vermelho_1", 0) + data.get("vermelho_2", 0)
+    linha = {
+        "datahora": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "id_rodada": data.get("id_rodada"),
+        "azul_1": data.get("azul_1"),
+        "azul_2": data.get("azul_2"),
+        "vermelho_1": data.get("vermelho_1"),
+        "vermelho_2": data.get("vermelho_2"),
+        "soma_azul": soma_azul,
+        "soma_vermelho": soma_vermelho,
+        "vencedor": data.get("vencedor"),
+        "multiplier": data.get("multiplier"),
+        "payout": data.get("payout"),
+        "status": data.get("status", "Resolved")
+    }
+    registrar_rodada(linha)
+    return jsonify({"status": "ok", "rodada": linha})
 
 @app.route("/ultima")
-def ultima():
-    """Retorna a última linha registrada localmente."""
-    nome_arquivo = f"dados/dados_{datetime.date.today()}.csv"
-    if not os.path.exists(nome_arquivo):
-        return jsonify({"erro": "sem dados ainda"}), 404
+def rota_ultima():
+    return jsonify(ultima_rodada())
 
-    with open(nome_arquivo, "r", encoding="utf-8") as f:
-        linhas = f.readlines()
-        if len(linhas) <= 1:
-            return jsonify({"erro": "nenhum registro"}), 404
-        ultima = linhas[-1].strip().split(",")
-        campos = [
-            "datahora","id_rodada","azul_1","azul_2","vermelho_1","vermelho_2",
-            "soma_azul","soma_vermelho","vencedor","multiplier","payout","status"
-        ]
-        return jsonify(dict(zip(campos, ultima)))
+@app.route("/historico")
+def rota_historico():
+    limite = request.args.get("limite", default=100, type=int)
+    return jsonify(ler_csv(limite))
 
+@app.route("/baixar")
+def baixar():
+    """Baixa o CSV atual."""
+    arquivo = caminho_csv()
+    if not os.path.exists(arquivo):
+        return jsonify({"erro": "nenhum CSV encontrado"}), 404
+    return send_file(arquivo, as_attachment=True)
+
+@app.route("/forcar_upload")
+def forcar_upload():
+    """Força envio manual do CSV atual ao Google Drive."""
+    enviar_para_drive()
+    return jsonify({"status": "ok", "mensagem": "Upload manual concluído."})
+
+# ==========================================================
+# 🚀 INICIALIZAÇÃO
+# ==========================================================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
