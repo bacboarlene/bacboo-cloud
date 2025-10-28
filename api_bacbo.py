@@ -1,22 +1,37 @@
 from flask import Flask, request, jsonify
-import csv, os, datetime
-from google.oauth2 import service_account
+import csv, os, datetime, pickle
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
 
 # ==========================================================
-# ☁️ CONFIGURAÇÃO GOOGLE DRIVE
+# ☁️ CONFIGURAÇÃO GOOGLE DRIVE (OAuth Pessoal)
 # ==========================================================
-SCOPES = ['https://www.googleapis.com/auth/drive']
-SERVICE_ACCOUNT_FILE = 'credentials.json'  # nome do arquivo baixado do Google Cloud
-FOLDER_ID = '1-oK5YSVhb8ajwu-Pil-BiB4GiE841um1'  # ID da pasta BacboCloud no Drive
+SCOPES = ['https://www.googleapis.com/auth/drive.file']
+TOKEN_PICKLE = 'token_drive.pkl'
+CLIENT_SECRET_FILE = 'client_secret.json'  # arquivo baixado do Google Cloud
+FOLDER_ID = '1-oK5YSVhb8ajwu-Pil-BiB4GiE841um1'  # pasta BacboCloud no Drive
 
-creds = service_account.Credentials.from_service_account_file(
-    SERVICE_ACCOUNT_FILE, scopes=SCOPES)
-drive_service = build('drive', 'v3', credentials=creds)
+def autenticar_drive():
+    creds = None
+    if os.path.exists(TOKEN_PICKLE):
+        with open(TOKEN_PICKLE, 'rb') as token:
+            creds = pickle.load(token)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open(TOKEN_PICKLE, 'wb') as token:
+            pickle.dump(creds, token)
+    return build('drive', 'v3', credentials=creds)
+
+drive_service = autenticar_drive()
 
 def enviar_para_drive(arquivo_local):
-    """Faz upload automático do CSV para o Google Drive"""
+    """Faz upload automático do CSV para o Google Drive pessoal"""
     try:
         nome_arquivo = os.path.basename(arquivo_local)
         file_metadata = {'name': nome_arquivo, 'parents': [FOLDER_ID]}
@@ -33,7 +48,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "✅ Bacbo Cloud ativo no Render + Google Drive!"
+    return "✅ Bacbo Cloud ativo com Google Drive (OAuth Pessoal)!"
 
 @app.route("/registrar", methods=["POST"])
 def registrar():
@@ -58,9 +73,7 @@ def registrar():
             datetime.datetime.now().isoformat()
         ])
 
-    # ⬆️ Envia o CSV atualizado pro Google Drive
     enviar_para_drive(arquivo)
-
     return jsonify({"status": "ok", "arquivo": arquivo})
 
 if __name__ == "__main__":
