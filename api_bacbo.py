@@ -1,8 +1,8 @@
 # ==========================================================
-# 🌐 Bacbo Cloud API – Render + Google Drive v4.0
+# 🌐 Bacbo Cloud API — Render + Google Drive v4.1
 # ==========================================================
 from flask import Flask, request, jsonify, send_file
-import csv, os, datetime, threading, time, pickle
+import csv, os, datetime, threading, time, pickle, base64
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.auth.transport.requests import Request
@@ -11,9 +11,22 @@ from google.auth.transport.requests import Request
 # ☁️ CONFIGURAÇÃO GOOGLE DRIVE
 # ==========================================================
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
-TOKEN_PICKLE = 'token_drive.pkl'  # token autenticado localmente
-FOLDER_ID = '1-oK5YSVhb8ajwu-Pil-BiB4GiE841um1'  # pasta BacboCloud
+TOKEN_PICKLE = 'token_drive.pkl'
+FOLDER_ID = '1-oK5YSVhb8ajwu-Pil-BiB4GiE841um1'  # ID da pasta BacboCloud
 
+# 🔹 Reconstrói token se existir variável de ambiente no Render
+token_env = os.getenv("TOKEN_DRIVE_BASE64")
+if token_env:
+    try:
+        with open(TOKEN_PICKLE, "wb") as f:
+            f.write(base64.b64decode(token_env))
+        print("🔐 Token reconstruído a partir da variável TOKEN_DRIVE_BASE64.")
+    except Exception as e:
+        print(f"⚠️ Falha ao reconstruir token: {e}")
+
+# ==========================================================
+# 🔹 Autenticação Drive
+# ==========================================================
 drive_service = None
 try:
     if os.path.exists(TOKEN_PICKLE):
@@ -35,12 +48,11 @@ except Exception as e:
 # 🧩 FUNÇÕES AUXILIARES CSV
 # ==========================================================
 def caminho_csv():
-    """Retorna o caminho do CSV do dia."""
     os.makedirs("dados", exist_ok=True)
     return os.path.join("dados", f"dados_{datetime.date.today()}.csv")
 
 def registrar_rodada(linha: dict):
-    """Registra uma nova rodada sem apagar as anteriores."""
+    """Incrementa sem apagar CSV"""
     arquivo = caminho_csv()
     cabecalho = [
         "datahora", "id_rodada", "azul_1", "azul_2",
@@ -55,7 +67,6 @@ def registrar_rodada(linha: dict):
         writer.writerow(linha)
 
 def ler_csv(limite=None):
-    """Lê as últimas N linhas do CSV atual."""
     arquivo = caminho_csv()
     if not os.path.exists(arquivo):
         return []
@@ -73,7 +84,7 @@ def ultima_rodada():
 # ☁️ UPLOAD PARA O GOOGLE DRIVE
 # ==========================================================
 def enviar_para_drive():
-    """Envia o CSV atual completo para o Google Drive."""
+    """Envia o CSV atual completo para o Google Drive"""
     if not drive_service:
         print("⚠️ Drive não autenticado, upload cancelado.")
         return
@@ -111,7 +122,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "🏠 Bacbo Cloud ativo — v4.0"
+    return "🏠 Bacbo Cloud ativo — v4.1"
 
 @app.route("/ping")
 def ping():
@@ -119,7 +130,6 @@ def ping():
 
 @app.route("/registrar", methods=["POST"])
 def registrar():
-    """Recebe rodada de outro sistema (ex: coletor local)."""
     data = request.json
     if not data:
         return jsonify({"erro": "sem dados"}), 400
@@ -154,7 +164,6 @@ def rota_historico():
 
 @app.route("/baixar")
 def baixar():
-    """Baixa o CSV atual."""
     arquivo = caminho_csv()
     if not os.path.exists(arquivo):
         return jsonify({"erro": "nenhum CSV encontrado"}), 404
@@ -162,7 +171,6 @@ def baixar():
 
 @app.route("/forcar_upload")
 def forcar_upload():
-    """Força envio manual do CSV atual ao Google Drive."""
     enviar_para_drive()
     return jsonify({"status": "ok", "mensagem": "Upload manual concluído."})
 
