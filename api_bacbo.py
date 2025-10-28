@@ -2,7 +2,6 @@ from flask import Flask, request, jsonify
 import csv, os, datetime, pickle
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 
 # ==========================================================
@@ -14,24 +13,30 @@ CLIENT_SECRET_FILE = 'client_secret.json'  # arquivo baixado do Google Cloud
 FOLDER_ID = '1-oK5YSVhb8ajwu-Pil-BiB4GiE841um1'  # pasta BacboCloud no Drive
 
 def autenticar_drive():
+    """Autentica com o Drive usando o token existente (sem abrir navegador no Render)."""
     creds = None
-    if os.path.exists(TOKEN_PICKLE):
-        with open(TOKEN_PICKLE, 'rb') as token:
-            creds = pickle.load(token)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open(TOKEN_PICKLE, 'wb') as token:
-            pickle.dump(creds, token)
-    return build('drive', 'v3', credentials=creds)
+    try:
+        if os.path.exists(TOKEN_PICKLE):
+            with open(TOKEN_PICKLE, 'rb') as token:
+                creds = pickle.load(token)
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                print("⚠️ Token ausente ou inválido. Reenvie o token_drive.pkl.")
+                return None
+        return build('drive', 'v3', credentials=creds)
+    except Exception as e:
+        print(f"⚠️ Falha ao autenticar Drive: {e}")
+        return None
 
 drive_service = autenticar_drive()
 
 def enviar_para_drive(arquivo_local):
-    """Faz upload automático do CSV para o Google Drive pessoal"""
+    """Faz upload automático do CSV para o Google Drive pessoal."""
+    if not drive_service:
+        print("⚠️ Drive não autenticado — arquivo não enviado.")
+        return
     try:
         nome_arquivo = os.path.basename(arquivo_local)
         file_metadata = {'name': nome_arquivo, 'parents': [FOLDER_ID]}
@@ -48,7 +53,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "✅ Bacbo Cloud ativo com Google Drive (OAuth Pessoal)!"
+    return "✅ Bacbo Cloud ativo no Render + Google Drive!"
 
 @app.route("/registrar", methods=["POST"])
 def registrar():
