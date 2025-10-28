@@ -1,5 +1,5 @@
 # ==========================================================
-# 🌐 BacBo Cloud Collector v4.1 – Render + Google Drive
+# 🌐 BacBo Cloud Collector v4.2 – Render Stable
 # ==========================================================
 from flask import Flask, jsonify, send_file, request
 import os, csv, datetime, time, threading, base64, pickle, io, requests, traceback
@@ -8,7 +8,7 @@ from googleapiclient.http import MediaFileUpload
 from google.auth.transport.requests import Request
 
 # ==========================================================
-# ☁️ CONFIGURAÇÃO DO GOOGLE DRIVE
+# ☁️ GOOGLE DRIVE CONFIG
 # ==========================================================
 FOLDER_ID = "1-oK5YSVhb8ajwu-Pil-BiB4GiE841um1"
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
@@ -17,15 +17,14 @@ TOKEN_BASE64 = os.environ.get("TOKEN_DRIVE_BASE64")
 drive_service = None
 
 def autenticar_drive():
-    """Autentica via token codificado (TOKEN_DRIVE_BASE64)"""
+    """Autentica via token codificado TOKEN_DRIVE_BASE64"""
     global drive_service
     try:
         if not TOKEN_BASE64:
-            print("⚠️ TOKEN_DRIVE_BASE64 ausente no ambiente Render.")
+            print("⚠️ TOKEN_DRIVE_BASE64 ausente.")
             return None
 
-        data = base64.b64decode(TOKEN_BASE64)
-        creds = pickle.loads(data)
+        creds = pickle.loads(base64.b64decode(TOKEN_BASE64))
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
 
@@ -50,6 +49,7 @@ def enviar_para_drive(arquivo_local):
         try:
             drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
         except Exception:
+            # se pasta não tiver permissão, envia para raiz
             file_metadata.pop('parents', None)
             drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
         print(f"☁️ CSV enviado ao Drive: {nome_arquivo}")
@@ -57,28 +57,34 @@ def enviar_para_drive(arquivo_local):
         print(f"⚠️ Erro ao enviar para o Drive: {e}")
 
 # ==========================================================
-# 🎲 COLETOR DE DADOS CASINO SCORES
+# 🎲 COLETOR DE DADOS
 # ==========================================================
 URL_LATEST = "https://api.casinoscores.com/svc-evolution-game-events/api/bacbo/latest"
 ultimo_id = None
+coleta_ativa = False
+
 os.makedirs("dados", exist_ok=True)
 os.makedirs("logs", exist_ok=True)
 
 def registrar_erro(msg):
-    """Salva erros no log"""
     with open("logs/erros.txt", "a", encoding="utf-8") as f:
         f.write(f"[{datetime.datetime.now()}] {msg}\n")
 
 def coletar_dados():
-    """Loop contínuo de coleta (resistente a quedas)"""
-    global ultimo_id
+    """Coleta em loop contínuo"""
+    global ultimo_id, coleta_ativa
+    if coleta_ativa:
+        print("🌀 Coleta já em execução, ignorando inicialização duplicada.")
+        return
+    coleta_ativa = True
     sess = requests.Session()
-    print("🌐 Coleta iniciada.")
+    print("🌐 Coleta iniciada (modo contínuo a cada 3 s).")
+
     while True:
         try:
             r = sess.get(URL_LATEST, timeout=8)
             if r.status_code != 200:
-                time.sleep(3)
+                time.sleep(4)
                 continue
 
             j = r.json()
@@ -135,7 +141,7 @@ def coletar_dados():
             time.sleep(5)
 
 # ==========================================================
-# ⏰ UPLOAD AUTOMÁTICO À MEIA-NOITE (BRT)
+# ⏰ UPLOAD AUTOMÁTICO À MEIA-NOITE
 # ==========================================================
 def agendar_upload():
     while True:
@@ -152,24 +158,13 @@ def agendar_upload():
             time.sleep(30)
 
 # ==========================================================
-# 🔁 AUTO-PING (MANTÉM SERVIÇO ATIVO)
-# ==========================================================
-def auto_ping():
-    while True:
-        try:
-            requests.get("https://bacboo-cloud.onrender.com/ping", timeout=5)
-        except:
-            pass
-        time.sleep(240)  # a cada 4 minutos
-
-# ==========================================================
 # 🌐 FLASK ENDPOINTS
 # ==========================================================
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "🌐 BacBo Cloud Collector v4.1 ativo."
+    return "🌐 BacBo Cloud Collector v4.2 ativo."
 
 @app.route("/ping")
 def ping():
@@ -209,11 +204,35 @@ def forcar_upload():
         return jsonify({"status": "Upload forçado concluído."})
     return jsonify({"erro": "Nenhum CSV para enviar."})
 
+@app.route("/status")
+def status():
+    nome_hist = "dados/historico_bacbo.csv"
+    total = 0
+    ultima = {}
+    if os.path.exists(nome_hist):
+        with open(nome_hist, encoding="utf-8") as f:
+            linhas = list(csv.DictReader(f))
+            total = len(linhas)
+            if linhas:
+                ultima = linhas[-1]
+    return jsonify({
+        "status": "online",
+        "total_registros": total,
+        "ultima_rodada": ultima.get("id_rodada", ""),
+        "vencedor": ultima.get("vencedor", ""),
+        "hora_atual": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    })
+
 # ==========================================================
-# 🚀 EXECUÇÃO
+# 🚀 INICIALIZAÇÃO COM ATRASO CONTROLADO
 # ==========================================================
-if __name__ == "__main__":
+def iniciar_threads():
+    print("⏳ Aguardando inicialização completa do servidor...")
+    time.sleep(5)
     threading.Thread(target=coletar_dados, daemon=True).start()
     threading.Thread(target=agendar_upload, daemon=True).start()
-    threading.Thread(target=auto_ping, daemon=True).start()
+    print("✅ Threads de coleta e upload iniciadas.")
+
+if __name__ == "__main__":
+    threading.Thread(target=iniciar_threads, daemon=True).start()
     app.run(host="0.0.0.0", port=10000)
